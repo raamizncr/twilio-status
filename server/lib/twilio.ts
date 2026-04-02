@@ -209,6 +209,48 @@ function str(v: unknown): string | undefined {
   return typeof v === "string" ? v : undefined;
 }
 
+/** Bundle SID linking an A2P brand to a Trust Hub customer profile (BU…). */
+function brandCustomerProfileBundleSid(
+  detail: Record<string, unknown>,
+  listRow: Record<string, unknown>
+): string | undefined {
+  return (
+    str(detail.customer_profile_bundle_sid) ??
+    str(detail.customerProfileBundleSid) ??
+    str(detail.a2p_profile_bundle_sid) ??
+    str(detail.a2pProfileBundleSid) ??
+    str(listRow.customer_profile_bundle_sid) ??
+    str(listRow.customerProfileBundleSid)
+  );
+}
+
+/**
+ * The Brand Registrations list is queried per profile, but responses can still include
+ * brands tied to other bundles. Only attach a brand under the profile it belongs to
+ * so counts match Twilio Console (one row per brand).
+ */
+function brandBelongsToCustomerProfile(
+  profileSid: string,
+  detail: Record<string, unknown>,
+  listRow: Record<string, unknown>
+): boolean {
+  const bundle = brandCustomerProfileBundleSid(detail, listRow);
+  if (!bundle) return true;
+  return bundle === profileSid;
+}
+
+function dedupeBrandListBySid(rows: Record<string, unknown>[]): Record<string, unknown>[] {
+  const seen = new Set<string>();
+  const out: Record<string, unknown>[] = [];
+  for (const r of rows) {
+    const id = str(r.sid);
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    out.push(r);
+  }
+  return out;
+}
+
 /** Run up to `limit` async tasks in parallel across `items`. */
 async function runPool<T, R>(
   items: T[],
@@ -304,7 +346,9 @@ async function processSubaccount(
           brands: [],
         };
 
-        const brandList = await listBrandsForProfile(sid, subToken, profileSid);
+        const brandList = dedupeBrandListBySid(
+          await listBrandsForProfile(sid, subToken, profileSid)
+        );
         const brandEntries = await Promise.all(
           brandList.map(async (b) => {
             const brandSid = str(b.sid);
@@ -316,6 +360,9 @@ async function processSubaccount(
               } catch {
                 /* list row is enough */
               }
+            }
+            if (!brandBelongsToCustomerProfile(profileSid, detail, b)) {
+              return null;
             }
             const bStatus = str(detail.status);
             const idStatus = str(detail.identity_status);
