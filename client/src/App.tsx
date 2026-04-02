@@ -53,7 +53,8 @@ function badgeClass(status: string | undefined): string {
     s.includes("PENDING") ||
     s.includes("REVIEW") ||
     s === "IN_PROGRESS" ||
-    s.includes("MNO_PENDING")
+    s.includes("MNO_PENDING") ||
+    s === "DRAFT"
   )
     return "pending";
   return "neutral";
@@ -162,8 +163,8 @@ export default function App() {
         <div className="title-block">
           <h1>A2P visibility</h1>
           <p className="tagline">
-            Scan approval status for Trust profiles, brands, and campaigns. Read-only — use Refresh after
-            changes in Twilio or Telnyx.
+            Track A2P end-to-end: drafts, pending reviews, brand and campaign verification, failures, and
+            rejections. Read-only — refresh after changes in Twilio or Telnyx.
           </p>
         </div>
         <div className="toolbar-row">
@@ -266,6 +267,86 @@ function twilioMetrics(s: TwilioSub) {
   };
 }
 
+function twilioRejectionCount(s: TwilioSub): number {
+  return s.rejectionItems?.length ?? 0;
+}
+
+function twilioPipelineCount(s: TwilioSub): number {
+  return s.pipelineItems?.length ?? 0;
+}
+
+function rejectionHeadline(it: TwilioRejectionItem): string {
+  switch (it.scope) {
+    case "profile":
+      return `Customer profile · ${it.profileName ?? it.profileSid ?? "—"}`;
+    case "brand":
+      return `A2P brand · ${it.brandName ?? it.brandSid ?? "—"} (profile: ${it.profileName ?? "—"})`;
+    case "campaign":
+      return `10DLC campaign · ${it.messagingServiceName ?? it.messagingServiceSid ?? "—"} (brand: ${it.brandName ?? "—"})`;
+    default:
+      return "";
+  }
+}
+
+function pipelineHeadline(it: TwilioPipelineItem): string {
+  switch (it.scope) {
+    case "profile":
+      return `Customer profile · ${it.profileName ?? it.profileSid ?? "—"}`;
+    case "brand":
+      return `A2P brand · ${it.brandName ?? it.brandSid ?? "—"} (profile: ${it.profileName ?? "—"})`;
+    case "campaign":
+      return `10DLC campaign · ${it.messagingServiceName ?? it.messagingServiceSid ?? "—"} (brand: ${it.brandName ?? "—"})`;
+    default:
+      return "";
+  }
+}
+
+function PipelineSummaryBlock({ items }: { items: TwilioPipelineItem[] }) {
+  if (items.length === 0) return null;
+  return (
+    <div className="pipeline-block" role="region" aria-label="In progress A2P registrations">
+      <p className="pipeline-block-title">In progress — pending, review, or verification</p>
+      <ul className="pipeline-list">
+        {items.map((it, i) => (
+          <li key={i} className="pipeline-item">
+            <div className="pipeline-item-head">
+              <span className={`pipeline-scope scope-${it.scope}`}>{it.scope}</span>
+              <span className="pipeline-phase">{it.phaseLabel}</span>
+              <span className={`badge ${badgeClass(it.statusCode)}`}>{it.statusLabel}</span>
+            </div>
+            <p className="pipeline-headline">{pipelineHeadline(it)}</p>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function RejectionSummaryBlock({ items }: { items: TwilioRejectionItem[] }) {
+  if (items.length === 0) return null;
+  return (
+    <div className="rejection-block" role="region" aria-label="Failed or rejected registrations">
+      <p className="rejection-block-title">Failed / rejected (reasons from Twilio when available)</p>
+      <ul className="rejection-list">
+        {items.map((it, i) => (
+          <li key={i} className="rejection-item">
+            <div className="rejection-item-head">
+              <span className={`rejection-scope scope-${it.scope}`}>{it.scope}</span>
+              <span className={`badge ${badgeClass(it.statusCode)}`}>{it.statusLabel}</span>
+            </div>
+            <p className="rejection-headline">{rejectionHeadline(it)}</p>
+            <ul className="rejection-reasons">
+              {it.reasons.map((r, j) => (
+                <li key={j}>{r}</li>
+              ))}
+            </ul>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 function TwilioView({ payload, search }: { payload: unknown; search: string }) {
   const p = payload as { data?: { subaccounts?: TwilioSub[] }; error?: string };
   if (p.error) return <div className="err">{p.error}</div>;
@@ -290,6 +371,12 @@ function TwilioView({ payload, search }: { payload: unknown; search: string }) {
       const ae = a.error ? 0 : 1;
       const be = b.error ? 0 : 1;
       if (ae !== be) return ae - be;
+      const ar = twilioRejectionCount(a);
+      const br = twilioRejectionCount(b);
+      if (br !== ar) return br - ar;
+      const ap = twilioPipelineCount(a);
+      const bp = twilioPipelineCount(b);
+      if (bp !== ap) return bp - ap;
       return a.friendlyName.localeCompare(b.friendlyName);
     });
   }, [allSubs, search]);
@@ -297,12 +384,18 @@ function TwilioView({ payload, search }: { payload: unknown; search: string }) {
   const totals = useMemo(() => {
     const withErr = allSubs.filter((x) => x.error).length;
     const profs = allSubs.reduce((n, x) => n + x.profiles.length, 0);
-    return { subCount: allSubs.length, withErr, profs };
+    let rejectionRows = 0;
+    let pipelineRows = 0;
+    for (const x of allSubs) {
+      rejectionRows += twilioRejectionCount(x);
+      pipelineRows += twilioPipelineCount(x);
+    }
+    return { subCount: allSubs.length, withErr, profs, rejectionRows, pipelineRows };
   }, [allSubs]);
 
   return (
     <>
-      <div className="stats-grid">
+      <div className="stats-grid stats-grid-wide">
         <div className="stat-card">
           <div className="stat-value">{totals.subCount}</div>
           <div className="stat-label">Subaccounts</div>
@@ -311,11 +404,30 @@ function TwilioView({ payload, search }: { payload: unknown; search: string }) {
           <div className="stat-value">{totals.profs}</div>
           <div className="stat-label">Trust profiles (total)</div>
         </div>
+        <div
+          className={`stat-card ${totals.pipelineRows > 0 ? "highlight-warn" : ""}`}
+        >
+          <div className="stat-value">{totals.pipelineRows}</div>
+          <div className="stat-label">In progress rows (Twilio)</div>
+        </div>
         <div className={`stat-card ${totals.withErr > 0 ? "highlight-bad" : ""}`}>
           <div className="stat-value">{totals.withErr}</div>
-          <div className="stat-label">Subaccounts with errors</div>
+          <div className="stat-label">Fetch errors</div>
+        </div>
+        <div
+          className={`stat-card ${totals.rejectionRows > 0 ? "highlight-bad" : ""}`}
+        >
+          <div className="stat-value">{totals.rejectionRows}</div>
+          <div className="stat-label">Failed / rejected (Twilio)</div>
         </div>
       </div>
+      <aside className="info-callout">
+        <strong>Why multiple brands on one subaccount?</strong> Each subaccount can have one or more{" "}
+        <em>Trust Hub customer profiles</em>. Under each profile, Twilio allows multiple{" "}
+        <em>A2P brand registrations</em> — for example different legal entities, DBA names, retries after
+        failure, or separate brands that share the same business customer. So four brands usually means four
+        distinct brand registrations tied to that dealer&apos;s profile(s), not an error in this dashboard.
+      </aside>
       {search && (
         <p className="filter-hint">
           Showing {subs.length} match{subs.length === 1 ? "" : "es"}
@@ -323,7 +435,10 @@ function TwilioView({ payload, search }: { payload: unknown; search: string }) {
         </p>
       )}
 
-      {subs.map((s) => (
+      {subs.map((s) => {
+        const rej = twilioRejectionCount(s);
+        const pipe = twilioPipelineCount(s);
+        return (
         <details
           key={s.sid}
           className={`card ${s.error ? "card-error" : ""}`}
@@ -352,10 +467,24 @@ function TwilioView({ payload, search }: { payload: unknown; search: string }) {
                 })()}
               </div>
             </div>
-            <span className={`badge ${badgeClass(s.status)}`}>{s.status}</span>
+            <div className="summary-badges">
+              <span className={`badge ${badgeClass(s.status)}`}>{s.status}</span>
+              {pipe > 0 && (
+                <span className="badge pending" title="Draft, pending, in review, or awaiting verification">
+                  {pipe} in progress
+                </span>
+              )}
+              {rej > 0 && (
+                <span className="badge bad" title="Failed profile, brand, or campaign registrations">
+                  {rej} failed
+                </span>
+              )}
+            </div>
           </summary>
           <div className="inner">
             {s.error && <div className="err">{s.error}</div>}
+            {!s.error && <PipelineSummaryBlock items={s.pipelineItems ?? []} />}
+            {!s.error && <RejectionSummaryBlock items={s.rejectionItems ?? []} />}
             {!s.error && s.profiles.length === 0 && (
               <p className="empty">No Trust Hub customer profiles on this subaccount.</p>
             )}
@@ -436,8 +565,69 @@ function TwilioView({ payload, search }: { payload: unknown; search: string }) {
             )}
           </div>
         </details>
-      ))}
+        );
+      })}
     </>
+  );
+}
+
+function telnyxInFlightStatuses(status: string | undefined): boolean {
+  return badgeClass(status) === "pending";
+}
+
+function telnyxPipelineItemsForTenant(t: TelnyxTenant): {
+  kind: "brand" | "campaign";
+  title: string;
+  statusLabel: string;
+  statusCode: string;
+}[] {
+  const rows: {
+    kind: "brand" | "campaign";
+    title: string;
+    statusLabel: string;
+    statusCode: string;
+  }[] = [];
+  for (const b of t.brands) {
+    if (telnyxInFlightStatuses(b.status)) {
+      rows.push({
+        kind: "brand",
+        title: `Brand · ${b.displayName}`,
+        statusLabel: b.statusLabel,
+        statusCode: b.status,
+      });
+    }
+    for (const c of b.campaigns) {
+      if (telnyxInFlightStatuses(c.status)) {
+        rows.push({
+          kind: "campaign",
+          title: `${c.displayName ?? truncateSid(c.id, 8)} · brand ${b.displayName}`,
+          statusLabel: c.statusLabel,
+          statusCode: c.status,
+        });
+      }
+    }
+  }
+  return rows;
+}
+
+function TelnyxPipelineBlock({ tenant }: { tenant: TelnyxTenant }) {
+  const items = telnyxPipelineItemsForTenant(tenant);
+  if (items.length === 0) return null;
+  return (
+    <div className="pipeline-block" role="region" aria-label="Telnyx registrations in progress">
+      <p className="pipeline-block-title">In progress — Telnyx 10DLC</p>
+      <ul className="pipeline-list">
+        {items.map((it, i) => (
+          <li key={i} className="pipeline-item">
+            <div className="pipeline-item-head">
+              <span className={`pipeline-scope scope-${it.kind}`}>{it.kind}</span>
+              <span className={`badge ${badgeClass(it.statusCode)}`}>{it.statusLabel}</span>
+            </div>
+            <p className="pipeline-headline">{it.title}</p>
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
 
@@ -465,18 +655,20 @@ function TelnyxView({ payload, search }: { payload: unknown; search: string }) {
   const txTotals = useMemo(() => {
     let brands = 0;
     let camps = 0;
+    let pipelineRows = 0;
     for (const t of tenantsRaw) {
       brands += t.brands.length;
       for (const b of t.brands) camps += b.campaigns.length;
+      pipelineRows += telnyxPipelineItemsForTenant(t).length;
     }
-    return { tenants: tenantsRaw.length, brands, camps };
+    return { tenants: tenantsRaw.length, brands, camps, pipelineRows };
   }, [tenantsRaw]);
 
   const filteredBrandRows = tenants.reduce((n, t) => n + t.brands.length, 0);
 
   return (
     <>
-      <div className="stats-grid">
+      <div className="stats-grid stats-grid-wide">
         <div className="stat-card">
           <div className="stat-value">{txTotals.tenants}</div>
           <div className="stat-label">API keys / tenants</div>
@@ -489,6 +681,12 @@ function TelnyxView({ payload, search }: { payload: unknown; search: string }) {
           <div className="stat-value">{txTotals.camps}</div>
           <div className="stat-label">Campaigns (rows)</div>
         </div>
+        <div
+          className={`stat-card ${txTotals.pipelineRows > 0 ? "highlight-warn" : ""}`}
+        >
+          <div className="stat-value">{txTotals.pipelineRows}</div>
+          <div className="stat-label">In progress (pending / review)</div>
+        </div>
       </div>
       {search && (
         <p className="filter-hint">
@@ -496,7 +694,9 @@ function TelnyxView({ payload, search }: { payload: unknown; search: string }) {
         </p>
       )}
 
-      {tenants.map((t) => (
+      {tenants.map((t) => {
+        const txPipe = telnyxPipelineItemsForTenant(t).length;
+        return (
         <details
           key={t.label}
           className={`card ${t.error ? "card-error" : ""}`}
@@ -509,14 +709,22 @@ function TelnyxView({ payload, search }: { payload: unknown; search: string }) {
                 {t.brands.length} brand{t.brands.length === 1 ? "" : "s"}
               </span>
             </div>
-            {t.error ? (
-              <span className="badge bad">Error</span>
-            ) : (
-              <span className="badge ok">OK</span>
-            )}
+            <div className="summary-badges">
+              {t.error ? (
+                <span className="badge bad">Error</span>
+              ) : (
+                <span className="badge ok">OK</span>
+              )}
+              {!t.error && txPipe > 0 && (
+                <span className="badge pending" title="Brand or campaign still in progress">
+                  {txPipe} in progress
+                </span>
+              )}
+            </div>
           </summary>
           <div className="inner">
             {t.error && <div className="err">{t.error}</div>}
+            {!t.error && <TelnyxPipelineBlock tenant={t} />}
             {!t.error && t.brands.length === 0 && (
               <p className="empty">No 10DLC brands for this key.</p>
             )}
@@ -557,16 +765,53 @@ function TelnyxView({ payload, search }: { payload: unknown; search: string }) {
             ))}
           </div>
         </details>
-      ))}
+        );
+      })}
     </>
   );
 }
+
+type TwilioRejectionItem = {
+  scope: "profile" | "brand" | "campaign";
+  profileSid?: string;
+  profileName?: string;
+  brandSid?: string;
+  brandName?: string;
+  messagingServiceSid?: string;
+  messagingServiceName?: string;
+  statusLabel: string;
+  statusCode: string;
+  reasons: string[];
+};
+
+type TwilioPipelinePhase =
+  | "draft"
+  | "pending"
+  | "in_review"
+  | "verification_pending"
+  | "in_progress";
+
+type TwilioPipelineItem = {
+  scope: "profile" | "brand" | "campaign";
+  phase: TwilioPipelinePhase;
+  phaseLabel: string;
+  profileSid?: string;
+  profileName?: string;
+  brandSid?: string;
+  brandName?: string;
+  messagingServiceSid?: string;
+  messagingServiceName?: string;
+  statusLabel: string;
+  statusCode: string;
+};
 
 type TwilioSub = {
   sid: string;
   friendlyName: string;
   status: string;
   error?: string;
+  rejectionItems?: TwilioRejectionItem[];
+  pipelineItems?: TwilioPipelineItem[];
   profiles: TwilioPr[];
   orphanCampaigns: TwilioCamp[];
 };

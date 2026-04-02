@@ -5,6 +5,10 @@ import {
   profileStatusLabel,
   twilioOverallStatus,
 } from "./status-labels.js";
+import { buildRejectionItems, type TwilioRejectionItem } from "./twilio-rejection.js";
+import { buildPipelineItems, type TwilioPipelineItem } from "./twilio-pipeline.js";
+
+export type { TwilioRejectionItem, TwilioPipelineItem };
 
 const API = "https://api.twilio.com";
 const TRUST = "https://trusthub.twilio.com/v1";
@@ -40,6 +44,10 @@ export type TwilioSubaccountRow = {
   friendlyName: string;
   status: string;
   error?: string;
+  /** Aggregated failed / rejected profile, brand, and campaign rows with API reasons when present */
+  rejectionItems?: TwilioRejectionItem[];
+  /** Draft, pending review, in review, pending verification — still in flight */
+  pipelineItems?: TwilioPipelineItem[];
   profiles: TwilioProfileRow[];
   orphanCampaigns: TwilioCampaignRow[];
 };
@@ -344,8 +352,13 @@ async function processSubaccount(
     for (const [, camps] of campaignsByBrand) {
       row.orphanCampaigns.push(...camps);
     }
+
+    row.rejectionItems = buildRejectionItems(row);
+    row.pipelineItems = buildPipelineItems(row);
   } catch (e) {
     row.error = e instanceof Error ? e.message : String(e);
+    row.rejectionItems = [];
+    row.pipelineItems = [];
   }
 
   return row;
