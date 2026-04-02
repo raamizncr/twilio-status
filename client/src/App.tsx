@@ -1,6 +1,26 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { RawDataPanel } from "./RawDataPanel";
 
 type Provider = "twilio" | "telnyx";
+type Theme = "light" | "dark";
+
+const THEME_KEY = "a2p-theme";
+
+function useTheme(): [Theme, (t: Theme) => void] {
+  const [theme, setTheme] = useState<Theme>(() => {
+    if (typeof window === "undefined") return "dark";
+    const s = localStorage.getItem(THEME_KEY);
+    if (s === "light" || s === "dark") return s;
+    return window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+  });
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    localStorage.setItem(THEME_KEY, theme);
+  }, [theme]);
+
+  return [theme, setTheme];
+}
 
 function badgeClass(status: string | undefined): string {
   const s = (status ?? "").toUpperCase();
@@ -56,7 +76,48 @@ function truncateSid(sid: string, left = 10): string {
   return `${sid.slice(0, left)}…${sid.slice(-4)}`;
 }
 
+function IconSun() {
+  return (
+    <svg
+      className="theme-icon"
+      xmlns="http://www.w3.org/2000/svg"
+      width="20"
+      height="20"
+      fill="none"
+      viewBox="0 0 24 24"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      aria-hidden
+    >
+      <circle cx="12" cy="12" r="4" />
+      <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41" />
+    </svg>
+  );
+}
+
+function IconMoon() {
+  return (
+    <svg
+      className="theme-icon"
+      xmlns="http://www.w3.org/2000/svg"
+      width="20"
+      height="20"
+      fill="none"
+      viewBox="0 0 24 24"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z" />
+    </svg>
+  );
+}
+
 export default function App() {
+  const [theme, setTheme] = useTheme();
   const [provider, setProvider] = useState<Provider>("twilio");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -106,6 +167,28 @@ export default function App() {
           </p>
         </div>
         <div className="toolbar-row">
+          <div className="theme-switch" role="group" aria-label="Color theme">
+            <button
+              type="button"
+              className={theme === "light" ? "active" : ""}
+              onClick={() => setTheme("light")}
+              title="Light theme"
+              aria-label="Light theme"
+              aria-pressed={theme === "light"}
+            >
+              <IconSun />
+            </button>
+            <button
+              type="button"
+              className={theme === "dark" ? "active" : ""}
+              onClick={() => setTheme("dark")}
+              title="Dark theme"
+              aria-label="Dark theme"
+              aria-pressed={theme === "dark"}
+            >
+              <IconMoon />
+            </button>
+          </div>
           <div className="seg" role="tablist" aria-label="Provider">
             <button
               type="button"
@@ -290,7 +373,7 @@ function TwilioView({ payload, search }: { payload: unknown; search: string }) {
                     {pr.email && <>{pr.email} · </>}
                     Last updated {pr.dateUpdated ?? "—"}
                   </p>
-                  <JsonToggle label="Raw profile JSON" data={pr.raw} />
+                  <RawDataPanel variant="twilio-profile" data={pr.raw} />
                   {pr.brands.length === 0 && (
                     <p className="empty">No A2P brand registrations for this profile.</p>
                   )}
@@ -312,18 +395,20 @@ function TwilioView({ payload, search }: { payload: unknown; search: string }) {
                       </summary>
                       <div className="inner">
                         <p className="section-label">Messaging · US A2P (10DLC campaign)</p>
-                        <JsonToggle label="Raw brand JSON" data={b.raw} />
+                        <RawDataPanel variant="twilio-brand" data={b.raw} />
                         {b.campaigns.length === 0 && (
                           <p className="empty">No messaging service / Usa2p linked to this brand.</p>
                         )}
                         {b.campaigns.map((c) => (
-                          <div key={c.messagingServiceSid} className="campaign-line">
-                            <strong>{c.messagingServiceName}</strong>
-                            <span className="meta">{truncateSid(c.messagingServiceSid, 12)}</span>
-                            <span className={`badge ${badgeClass(c.campaignStatus)}`}>
-                              {c.statusLabel}
-                            </span>
-                            <JsonToggle label="Usa2p payload" data={c.raw} />
+                          <div key={c.messagingServiceSid} className="campaign-block">
+                            <div className="campaign-line">
+                              <strong>{c.messagingServiceName}</strong>
+                              <span className="meta">{truncateSid(c.messagingServiceSid, 12)}</span>
+                              <span className={`badge ${badgeClass(c.campaignStatus)}`}>
+                                {c.statusLabel}
+                              </span>
+                            </div>
+                            <RawDataPanel variant="twilio-usa2p" data={c.raw} />
                           </div>
                         ))}
                       </div>
@@ -339,10 +424,12 @@ function TwilioView({ payload, search }: { payload: unknown; search: string }) {
                   Usa2p rows whose brand did not match a profile brand — still listed here.
                 </p>
                 {s.orphanCampaigns.map((c) => (
-                  <div key={c.messagingServiceSid} className="campaign-line">
-                    <strong>{c.messagingServiceName}</strong>
-                    <span className={`badge ${badgeClass(c.campaignStatus)}`}>{c.statusLabel}</span>
-                    <JsonToggle label="Usa2p JSON" data={c.raw} />
+                  <div key={c.messagingServiceSid} className="campaign-block">
+                    <div className="campaign-line">
+                      <strong>{c.messagingServiceName}</strong>
+                      <span className={`badge ${badgeClass(c.campaignStatus)}`}>{c.statusLabel}</span>
+                    </div>
+                    <RawDataPanel variant="twilio-usa2p" data={c.raw} />
                   </div>
                 ))}
               </div>
@@ -450,17 +537,19 @@ function TelnyxView({ payload, search }: { payload: unknown; search: string }) {
                   </span>
                 </summary>
                 <div className="inner">
-                  <JsonToggle label="Raw brand JSON" data={b.raw} />
+                  <RawDataPanel variant="telnyx-brand" data={b.raw} />
                   <p className="section-label">Campaigns</p>
                   {b.campaigns.length === 0 && (
                     <p className="empty">No campaigns returned for this brand.</p>
                   )}
                   {b.campaigns.map((c) => (
-                    <div key={c.id} className="campaign-line">
-                      <strong>{c.displayName ?? truncateSid(c.id, 8)}</strong>
-                      <span className={`badge ${badgeClass(c.status)}`}>{c.statusLabel}</span>
-                      <span className="meta">TCR {c.tcrCampaignId ?? "—"}</span>
-                      <JsonToggle label="Raw campaign JSON" data={c.raw} />
+                    <div key={c.id} className="campaign-block">
+                      <div className="campaign-line">
+                        <strong>{c.displayName ?? truncateSid(c.id, 8)}</strong>
+                        <span className={`badge ${badgeClass(c.status)}`}>{c.statusLabel}</span>
+                        <span className="meta">TCR {c.tcrCampaignId ?? "—"}</span>
+                      </div>
+                      <RawDataPanel variant="telnyx-campaign" data={c.raw} />
                     </div>
                   ))}
                 </div>
@@ -538,15 +627,3 @@ type TelnyxCamp = {
   tcrCampaignId?: string;
   raw: Record<string, unknown>;
 };
-
-function JsonToggle({ label, data }: { label: string; data: Record<string, unknown> }) {
-  const [open, setOpen] = useState(false);
-  return (
-    <div className="json-toggle">
-      <button type="button" className="btn" onClick={() => setOpen((o) => !o)}>
-        {open ? "▼" : "▶"} {label}
-      </button>
-      {open && <pre className="raw">{JSON.stringify(data, null, 2)}</pre>}
-    </div>
-  );
-}

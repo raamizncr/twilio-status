@@ -1,6 +1,12 @@
 <!DOCTYPE html>
 <html lang="en">
   <head>
+    <script>
+      try {
+        var th = localStorage.getItem("a2p-theme");
+        if (th === "light" || th === "dark") document.documentElement.setAttribute("data-theme", th);
+      } catch (e) {}
+    </script>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>A2P Visibility</title>
