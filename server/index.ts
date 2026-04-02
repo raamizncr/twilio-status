@@ -16,7 +16,8 @@ app.use(cors());
 app.use(express.json());
 
 type CacheEntry = { at: number; body: unknown };
-const cacheTtlMs = Number(process.env.VISIBILITY_CACHE_TTL_MS ?? 30_000);
+/** Default 3 minutes — repeat Refresh uses cache for snappy UI (set 0 to disable). */
+const cacheTtlMs = Number(process.env.VISIBILITY_CACHE_TTL_MS ?? 180_000);
 const cache = new Map<string, CacheEntry>();
 
 function getCached(key: string): unknown | undefined {

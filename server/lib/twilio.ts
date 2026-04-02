@@ -201,64 +201,87 @@ function str(v: unknown): string | undefined {
   return typeof v === "string" ? v : undefined;
 }
 
-export async function buildTwilioVisibility(
-  parentSid: string,
-  parentToken: string
-): Promise<TwilioVisibilityPayload> {
-  const subs = await listSubaccounts(parentSid, parentToken);
-  const subaccounts: TwilioSubaccountRow[] = [];
+/** Run up to `limit` async tasks in parallel across `items`. */
+async function runPool<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<R>
+): Promise<R[]> {
+  if (items.length === 0) return [];
+  const results: R[] = new Array(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (true) {
+      const i = next++;
+      if (i >= items.length) return;
+      results[i] = await fn(items[i]);
+    }
+  };
+  const n = Math.min(Math.max(1, limit), items.length);
+  await Promise.all(Array.from({ length: n }, () => worker()));
+  return results;
+}
 
-  for (const sub of subs) {
-    const sid = sub.sid as string;
-    const row: TwilioSubaccountRow = {
-      sid,
-      friendlyName: sub.friendly_name ?? sid,
-      status: sub.status ?? "unknown",
-      profiles: [],
-      orphanCampaigns: [],
-    };
+async function processSubaccount(
+  sub: TwilioAccount,
+  parentToken: string,
+  skipBrandDetail: boolean
+): Promise<TwilioSubaccountRow> {
+  const sid = sub.sid as string;
+  const row: TwilioSubaccountRow = {
+    sid,
+    friendlyName: sub.friendly_name ?? sid,
+    status: sub.status ?? "unknown",
+    profiles: [],
+    orphanCampaigns: [],
+  };
 
-    try {
-      const subToken =
-        typeof sub.auth_token === "string" && sub.auth_token.length > 0
-          ? sub.auth_token
-          : parentToken;
+  try {
+    const subToken =
+      typeof sub.auth_token === "string" && sub.auth_token.length > 0
+        ? sub.auth_token
+        : parentToken;
 
-      const profileSids = await listCustomerProfileSids(sid, subToken);
+    const profileSids = await listCustomerProfileSids(sid, subToken);
 
-      const campaignsByBrand = new Map<string, TwilioCampaignRow[]>();
-      const services = await listMessagingServices(sid, subToken);
-      for (const svc of services) {
-        if (!svc.sid || !svc.links?.us_app_to_person) continue;
-        const usa2p = await getUsa2p(sid, subToken, svc.sid);
-        if (!usa2p) continue;
-        const brandReg =
-          str(usa2p.brand_registration_sid) ??
-          str(usa2p.brandRegistrationSid);
-        const campaignStatus =
-          str(usa2p.campaign_status) ?? str(usa2p.campaignStatus);
-        const campaignRow: TwilioCampaignRow = {
-          messagingServiceSid: svc.sid,
-          messagingServiceName: svc.friendly_name ?? svc.sid,
-          campaignStatus,
-          statusLabel: campaignStatusLabel(campaignStatus),
-          overallLabel: twilioOverallStatus(
-            undefined,
-            undefined,
-            campaignStatus
-          ),
-          raw: usa2p,
-        };
-        if (brandReg) {
-          const list = campaignsByBrand.get(brandReg) ?? [];
-          list.push(campaignRow);
-          campaignsByBrand.set(brandReg, list);
-        } else {
-          row.orphanCampaigns.push(campaignRow);
-        }
+    const campaignsByBrand = new Map<string, TwilioCampaignRow[]>();
+    const services = await listMessagingServices(sid, subToken);
+    const withUsa2p = services.filter((s) => s.sid && s.links?.us_app_to_person);
+    const usa2pPairs = await Promise.all(
+      withUsa2p.map(async (svc) => ({
+        svc,
+        usa2p: await getUsa2p(sid, subToken, svc.sid as string),
+      }))
+    );
+    for (const { svc, usa2p } of usa2pPairs) {
+      if (!usa2p || !svc.sid) continue;
+      const brandReg =
+        str(usa2p.brand_registration_sid) ?? str(usa2p.brandRegistrationSid);
+      const campaignStatus =
+        str(usa2p.campaign_status) ?? str(usa2p.campaignStatus);
+      const campaignRow: TwilioCampaignRow = {
+        messagingServiceSid: svc.sid,
+        messagingServiceName: svc.friendly_name ?? svc.sid,
+        campaignStatus,
+        statusLabel: campaignStatusLabel(campaignStatus),
+        overallLabel: twilioOverallStatus(
+          undefined,
+          undefined,
+          campaignStatus
+        ),
+        raw: usa2p,
+      };
+      if (brandReg) {
+        const list = campaignsByBrand.get(brandReg) ?? [];
+        list.push(campaignRow);
+        campaignsByBrand.set(brandReg, list);
+      } else {
+        row.orphanCampaigns.push(campaignRow);
       }
+    }
 
-      for (const profileSid of profileSids) {
+    const profileRows = await Promise.all(
+      profileSids.map(async (profileSid) => {
         const profRaw = await getCustomerProfile(sid, subToken, profileSid);
         const pStatus = str(profRaw.status);
         const profileRow: TwilioProfileRow = {
@@ -273,54 +296,77 @@ export async function buildTwilioVisibility(
           brands: [],
         };
 
-        const brandList = await listBrandsForProfile(
-          sid,
-          subToken,
-          profileSid
+        const brandList = await listBrandsForProfile(sid, subToken, profileSid);
+        const brandEntries = await Promise.all(
+          brandList.map(async (b) => {
+            const brandSid = str(b.sid);
+            if (!brandSid) return null;
+            let detail = b;
+            if (!skipBrandDetail) {
+              try {
+                detail = await getBrandDetail(sid, subToken, brandSid);
+              } catch {
+                /* list row is enough */
+              }
+            }
+            const bStatus = str(detail.status);
+            const idStatus = str(detail.identity_status);
+            const campaigns = campaignsByBrand.get(brandSid) ?? [];
+            campaignsByBrand.delete(brandSid);
+            const br: TwilioBrandRow = {
+              sid: brandSid,
+              friendlyName: str(detail.friendly_name) ?? brandSid,
+              status: bStatus ?? "unknown",
+              identityStatus: idStatus,
+              statusLabel: brandStatusLabel(bStatus),
+              overallLabel: twilioOverallStatus(
+                pStatus,
+                bStatus,
+                campaigns[0]?.campaignStatus
+              ),
+              dateCreated: str(detail.date_created),
+              dateUpdated: str(detail.date_updated),
+              raw: detail,
+              campaigns,
+            };
+            return br;
+          })
         );
-        for (const b of brandList) {
-          const brandSid = str(b.sid);
-          if (!brandSid) continue;
-          let detail = b;
-          try {
-            detail = await getBrandDetail(sid, subToken, brandSid);
-          } catch {
-            /* list row is enough */
-          }
-          const bStatus = str(detail.status);
-          const idStatus = str(detail.identity_status);
-          const campaigns = campaignsByBrand.get(brandSid) ?? [];
-          campaignsByBrand.delete(brandSid);
-          profileRow.brands.push({
-            sid: brandSid,
-            friendlyName: str(detail.friendly_name) ?? brandSid,
-            status: bStatus ?? "unknown",
-            identityStatus: idStatus,
-            statusLabel: brandStatusLabel(bStatus),
-            overallLabel: twilioOverallStatus(
-              pStatus,
-              bStatus,
-              campaigns[0]?.campaignStatus
-            ),
-            dateCreated: str(detail.date_created),
-            dateUpdated: str(detail.date_updated),
-            raw: detail,
-            campaigns,
-          });
-        }
+        profileRow.brands.push(
+          ...brandEntries.filter((x): x is TwilioBrandRow => x != null)
+        );
+        return profileRow;
+      })
+    );
 
-        row.profiles.push(profileRow);
-      }
+    row.profiles.push(...profileRows);
 
-      for (const [, camps] of campaignsByBrand) {
-        row.orphanCampaigns.push(...camps);
-      }
-    } catch (e) {
-      row.error = e instanceof Error ? e.message : String(e);
+    for (const [, camps] of campaignsByBrand) {
+      row.orphanCampaigns.push(...camps);
     }
-
-    subaccounts.push(row);
+  } catch (e) {
+    row.error = e instanceof Error ? e.message : String(e);
   }
+
+  return row;
+}
+
+export async function buildTwilioVisibility(
+  parentSid: string,
+  parentToken: string
+): Promise<TwilioVisibilityPayload> {
+  const subs = await listSubaccounts(parentSid, parentToken);
+  const concurrency = Math.max(
+    1,
+    Number(process.env.TWILIO_SUBACCOUNT_CONCURRENCY ?? 8)
+  );
+  const skipBrandDetail =
+    process.env.TWILIO_SKIP_BRAND_DETAIL_FETCH === "1" ||
+    process.env.TWILIO_SKIP_BRAND_DETAIL_FETCH === "true";
+
+  const subaccounts = await runPool(subs, concurrency, (sub) =>
+    processSubaccount(sub, parentToken, skipBrandDetail)
+  );
 
   return { subaccounts };
 }

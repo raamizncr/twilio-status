@@ -130,48 +130,53 @@ export async function buildTelnyxVisibility(): Promise<TelnyxVisibilityPayload> 
     const row: TelnyxTenantRow = { label, brands: [] };
     try {
       const brandRows = await listAllBrands(key);
-      for (const br of brandRows) {
-        const id = str(br.brandId) ?? str(br.id);
-        if (!id) continue;
-        const displayName =
-          str(br.displayName) ?? str(br.companyName) ?? str(br.name) ?? id;
-        const status = str(br.status) ?? "unknown";
-        const identityStatus = str(br.identityStatus) ?? str(br.identity_status);
-        let campaignsRaw: Record<string, unknown>[] = [];
-        try {
-          campaignsRaw = await listCampaignsForBrand(key, id);
-        } catch {
-          campaignsRaw = [];
-        }
-        const campaigns: TelnyxCampaignRow[] = campaignsRaw.map((c) => {
-          const cid =
-            str(c.campaignId) ?? str(c.id) ?? "unknown";
-          const cstatus =
-            str(c.campaignStatus) ??
-            str(c.submissionStatus) ??
-            str(c.status) ??
-            "unknown";
-          return {
-            id: cid,
-            displayName: str(c.brandDisplayName) ?? str(c.displayName) ?? str(c.name),
-            status: cstatus,
-            statusLabel: telnyxCampaignStatusLabel(cstatus),
-            tcrCampaignId: str(c.tcrCampaignId) ?? str(c.tcr_campaign_id),
-            raw: c,
+      const built = await Promise.all(
+        brandRows.map(async (br) => {
+          const id = str(br.brandId) ?? str(br.id);
+          if (!id) return null;
+          const displayName =
+            str(br.displayName) ?? str(br.companyName) ?? str(br.name) ?? id;
+          const status = str(br.status) ?? "unknown";
+          const identityStatus =
+            str(br.identityStatus) ?? str(br.identity_status);
+          let campaignsRaw: Record<string, unknown>[] = [];
+          try {
+            campaignsRaw = await listCampaignsForBrand(key, id);
+          } catch {
+            campaignsRaw = [];
+          }
+          const campaigns: TelnyxCampaignRow[] = campaignsRaw.map((c) => {
+            const cid = str(c.campaignId) ?? str(c.id) ?? "unknown";
+            const cstatus =
+              str(c.campaignStatus) ??
+              str(c.submissionStatus) ??
+              str(c.status) ??
+              "unknown";
+            return {
+              id: cid,
+              displayName:
+                str(c.brandDisplayName) ?? str(c.displayName) ?? str(c.name),
+              status: cstatus,
+              statusLabel: telnyxCampaignStatusLabel(cstatus),
+              tcrCampaignId: str(c.tcrCampaignId) ?? str(c.tcr_campaign_id),
+              raw: c,
+            };
+          });
+          const brandRow: TelnyxBrandRow = {
+            id,
+            displayName,
+            status,
+            statusLabel: telnyxBrandStatusLabel(status),
+            identityStatus,
+            identityLabel: telnyxIdentityStatusLabel(identityStatus),
+            tcrBrandId: str(br.tcrBrandId) ?? str(br.tcr_brand_id),
+            raw: br,
+            campaigns,
           };
-        });
-        row.brands.push({
-          id,
-          displayName,
-          status,
-          statusLabel: telnyxBrandStatusLabel(status),
-          identityStatus,
-          identityLabel: telnyxIdentityStatusLabel(identityStatus),
-          tcrBrandId: str(br.tcrBrandId) ?? str(br.tcr_brand_id),
-          raw: br,
-          campaigns,
-        });
-      }
+          return brandRow;
+        })
+      );
+      row.brands.push(...built.filter((x): x is TelnyxBrandRow => x != null));
     } catch (e) {
       row.error = e instanceof Error ? e.message : String(e);
     }
