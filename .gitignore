@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.env
+.DS_Store
+client/dist/
+
+# Local n8n exports may contain secrets — do not commit
+A2P*.json
