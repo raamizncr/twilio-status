@@ -1,15 +1,59 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 type Provider = "twilio" | "telnyx";
 
 function badgeClass(status: string | undefined): string {
   const s = (status ?? "").toUpperCase();
-  if (["VERIFIED", "APPROVED", "ACTIVE", "OPERATIONAL", "TWILIO-APPROVED"].includes(s))
+  if (
+    [
+      "VERIFIED",
+      "APPROVED",
+      "ACTIVE",
+      "OPERATIONAL",
+      "TWILIO-APPROVED",
+      "OK",
+      "TELNYX_ACCEPTED",
+      "MNO_PROVISIONED",
+      "MNO_ACCEPTED",
+    ].includes(s)
+  )
     return "ok";
-  if (["FAILED", "SUSPENDED", "TWILIO-REJECTED"].includes(s)) return "bad";
-  if (s.includes("PENDING") || s.includes("REVIEW") || s === "IN_PROGRESS")
+  if (
+    [
+      "FAILED",
+      "SUSPENDED",
+      "TWILIO-REJECTED",
+      "REGISTRATION_FAILED",
+      "TCR_FAILED",
+      "TELNYX_FAILED",
+    ].includes(s)
+  )
+    return "bad";
+  if (
+    s.includes("PENDING") ||
+    s.includes("REVIEW") ||
+    s === "IN_PROGRESS" ||
+    s.includes("MNO_PENDING")
+  )
     return "pending";
   return "neutral";
+}
+
+function formatFetched(iso: string): string {
+  try {
+    const d = new Date(iso);
+    return d.toLocaleString(undefined, {
+      dateStyle: "medium",
+      timeStyle: "short",
+    });
+  } catch {
+    return iso;
+  }
+}
+
+function truncateSid(sid: string, left = 10): string {
+  if (sid.length <= left + 6) return sid;
+  return `${sid.slice(0, left)}…${sid.slice(-4)}`;
 }
 
 export default function App() {
@@ -17,6 +61,7 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [payload, setPayload] = useState<unknown>(null);
+  const [search, setSearch] = useState("");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -42,217 +87,380 @@ export default function App() {
     void load();
   }, [load]);
 
-  return (
-    <>
-      <h1>A2P visibility</h1>
-      <p className="sub">
-        Subaccounts (Twilio) or tenants (Telnyx), Trust profiles, brands, and campaigns — read-only.
-      </p>
+  const fetchedAt =
+    payload &&
+    typeof payload === "object" &&
+    payload !== null &&
+    "fetchedAt" in payload
+      ? formatFetched((payload as { fetchedAt: string }).fetchedAt)
+      : null;
 
-      <div className="toolbar">
-        <div className="seg" role="tablist">
-          <button
-            type="button"
-            className={provider === "twilio" ? "active" : ""}
-            onClick={() => setProvider("twilio")}
-          >
-            Twilio
-          </button>
-          <button
-            type="button"
-            className={provider === "telnyx" ? "active" : ""}
-            onClick={() => setProvider("telnyx")}
-          >
-            Telnyx
-          </button>
+  return (
+    <div className="app-root">
+      <header className="app-header">
+        <div className="title-block">
+          <h1>A2P visibility</h1>
+          <p className="tagline">
+            Scan approval status for Trust profiles, brands, and campaigns. Read-only — use Refresh after
+            changes in Twilio or Telnyx.
+          </p>
         </div>
-        <button type="button" className="btn" disabled={loading} onClick={() => void load()}>
-          {loading ? "Loading…" : "Refresh"}
-        </button>
-        {payload &&
-          typeof payload === "object" &&
-          payload !== null &&
-          "fetchedAt" in payload && (
-            <span className="meta">Fetched {(payload as { fetchedAt: string }).fetchedAt}</span>
-          )}
-      </div>
+        <div className="toolbar-row">
+          <div className="seg" role="tablist" aria-label="Provider">
+            <button
+              type="button"
+              className={provider === "twilio" ? "active" : ""}
+              onClick={() => setProvider("twilio")}
+            >
+              Twilio
+            </button>
+            <button
+              type="button"
+              className={provider === "telnyx" ? "active" : ""}
+              onClick={() => setProvider("telnyx")}
+            >
+              Telnyx
+            </button>
+          </div>
+          <button
+            type="button"
+            className="btn btn-primary"
+            disabled={loading}
+            onClick={() => void load()}
+          >
+            {loading ? "Loading…" : "Refresh data"}
+          </button>
+          {fetchedAt && <span className="time-pill">Updated {fetchedAt}</span>}
+          <div className="search-wrap">
+            <input
+              type="search"
+              placeholder={provider === "twilio" ? "Filter subaccounts…" : "Filter brands / tenants…"}
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              aria-label="Filter list"
+            />
+          </div>
+        </div>
+      </header>
+
+      {loading && (
+        <div className="loading-banner" role="status">
+          Fetching from {provider === "twilio" ? "Twilio" : "Telnyx"}…
+        </div>
+      )}
 
       {error && <div className="err">{error}</div>}
 
-      {!error && payload && (
-        <VisibilityBody provider={provider} payload={payload} />
+      {!error && payload && provider === "twilio" && (
+        <TwilioView payload={payload} search={search.trim().toLowerCase()} />
       )}
+      {!error && payload && provider === "telnyx" && (
+        <TelnyxView payload={payload} search={search.trim().toLowerCase()} />
+      )}
+    </div>
+  );
+}
+
+function twilioMetrics(s: TwilioSub) {
+  let brandCount = 0;
+  let campaignVerified = 0;
+  let campaignOther = 0;
+  for (const p of s.profiles) {
+    brandCount += p.brands.length;
+    for (const b of p.brands) {
+      for (const c of b.campaigns) {
+        const st = (c.campaignStatus ?? "").toUpperCase();
+        if (st === "VERIFIED") campaignVerified++;
+        else if (st) campaignOther++;
+      }
+    }
+  }
+  return {
+    profiles: s.profiles.length,
+    brands: brandCount,
+    campaignVerified,
+    campaignOther,
+  };
+}
+
+function TwilioView({ payload, search }: { payload: unknown; search: string }) {
+  const p = payload as { data?: { subaccounts?: TwilioSub[] }; error?: string };
+  if (p.error) return <div className="err">{p.error}</div>;
+  const allSubs = p.data?.subaccounts ?? [];
+  if (allSubs.length === 0) {
+    return (
+      <p className="empty">
+        No subaccounts found. Check the parent account and API credentials.
+      </p>
+    );
+  }
+
+  const subs = useMemo(() => {
+    const filtered = !search
+      ? allSubs
+      : allSubs.filter(
+          (s) =>
+            s.friendlyName.toLowerCase().includes(search) ||
+            s.sid.toLowerCase().includes(search)
+        );
+    return [...filtered].sort((a, b) => {
+      const ae = a.error ? 0 : 1;
+      const be = b.error ? 0 : 1;
+      if (ae !== be) return ae - be;
+      return a.friendlyName.localeCompare(b.friendlyName);
+    });
+  }, [allSubs, search]);
+
+  const totals = useMemo(() => {
+    const withErr = allSubs.filter((x) => x.error).length;
+    const profs = allSubs.reduce((n, x) => n + x.profiles.length, 0);
+    return { subCount: allSubs.length, withErr, profs };
+  }, [allSubs]);
+
+  return (
+    <>
+      <div className="stats-grid">
+        <div className="stat-card">
+          <div className="stat-value">{totals.subCount}</div>
+          <div className="stat-label">Subaccounts</div>
+        </div>
+        <div className="stat-card">
+          <div className="stat-value">{totals.profs}</div>
+          <div className="stat-label">Trust profiles (total)</div>
+        </div>
+        <div className={`stat-card ${totals.withErr > 0 ? "highlight-bad" : ""}`}>
+          <div className="stat-value">{totals.withErr}</div>
+          <div className="stat-label">Subaccounts with errors</div>
+        </div>
+      </div>
+      {search && (
+        <p className="filter-hint">
+          Showing {subs.length} match{subs.length === 1 ? "" : "es"}
+          {subs.length === 0 ? " — try clearing search" : ""}
+        </p>
+      )}
+
+      {subs.map((s) => (
+        <details
+          key={s.sid}
+          className={`card ${s.error ? "card-error" : ""}`}
+          open={!!s.error}
+        >
+          <summary>
+            <div className="summary-main">
+              <span className="summary-title">{s.friendlyName}</span>
+              <span className="summary-sub">{truncateSid(s.sid)}</span>
+              <div className="kpi-row" aria-label="Summary counts">
+                {(() => {
+                  const m = twilioMetrics(s);
+                  return (
+                    <>
+                      <span className="kpi">
+                        Profiles <strong>{m.profiles}</strong>
+                      </span>
+                      <span className="kpi">
+                        Brands <strong>{m.brands}</strong>
+                      </span>
+                      <span className="kpi">
+                        Campaigns verified <strong>{m.campaignVerified}</strong>
+                      </span>
+                    </>
+                  );
+                })()}
+              </div>
+            </div>
+            <span className={`badge ${badgeClass(s.status)}`}>{s.status}</span>
+          </summary>
+          <div className="inner">
+            {s.error && <div className="err">{s.error}</div>}
+            {!s.error && s.profiles.length === 0 && (
+              <p className="empty">No Trust Hub customer profiles on this subaccount.</p>
+            )}
+            {s.profiles.map((pr) => (
+              <details key={pr.sid} className="nested-card" open={s.profiles.length <= 2}>
+                <summary>
+                  <div className="summary-main">
+                    <span className="summary-title">Profile · {pr.friendlyName}</span>
+                    <span className="summary-sub">{truncateSid(pr.sid)}</span>
+                  </div>
+                  <span className={`badge ${badgeClass(pr.status)}`}>{pr.statusLabel}</span>
+                </summary>
+                <div className="inner">
+                  <p className="muted-line">
+                    {pr.email && <>{pr.email} · </>}
+                    Last updated {pr.dateUpdated ?? "—"}
+                  </p>
+                  <JsonToggle label="Raw profile JSON" data={pr.raw} />
+                  {pr.brands.length === 0 && (
+                    <p className="empty">No A2P brand registrations for this profile.</p>
+                  )}
+                  {pr.brands.map((b) => (
+                    <details key={b.sid} className="nested-card" style={{ marginTop: "0.5rem" }}>
+                      <summary>
+                        <div className="summary-main">
+                          <span className="summary-title">Brand · {b.friendlyName}</span>
+                          <span className="summary-sub">{b.overallLabel}</span>
+                        </div>
+                        <span>
+                          <span className={`badge ${badgeClass(b.status)}`}>{b.statusLabel}</span>
+                          {b.identityStatus && (
+                            <span className="badge neutral" style={{ marginLeft: 6 }}>
+                              {b.identityStatus}
+                            </span>
+                          )}
+                        </span>
+                      </summary>
+                      <div className="inner">
+                        <p className="section-label">Messaging · US A2P (10DLC campaign)</p>
+                        <JsonToggle label="Raw brand JSON" data={b.raw} />
+                        {b.campaigns.length === 0 && (
+                          <p className="empty">No messaging service / Usa2p linked to this brand.</p>
+                        )}
+                        {b.campaigns.map((c) => (
+                          <div key={c.messagingServiceSid} className="campaign-line">
+                            <strong>{c.messagingServiceName}</strong>
+                            <span className="meta">{truncateSid(c.messagingServiceSid, 12)}</span>
+                            <span className={`badge ${badgeClass(c.campaignStatus)}`}>
+                              {c.statusLabel}
+                            </span>
+                            <JsonToggle label="Usa2p payload" data={c.raw} />
+                          </div>
+                        ))}
+                      </div>
+                    </details>
+                  ))}
+                </div>
+              </details>
+            ))}
+            {s.orphanCampaigns.length > 0 && (
+              <div style={{ marginTop: "1rem" }}>
+                <p className="section-label">Unmatched campaigns</p>
+                <p className="muted-line" style={{ marginBottom: "0.5rem" }}>
+                  Usa2p rows whose brand did not match a profile brand — still listed here.
+                </p>
+                {s.orphanCampaigns.map((c) => (
+                  <div key={c.messagingServiceSid} className="campaign-line">
+                    <strong>{c.messagingServiceName}</strong>
+                    <span className={`badge ${badgeClass(c.campaignStatus)}`}>{c.statusLabel}</span>
+                    <JsonToggle label="Usa2p JSON" data={c.raw} />
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </details>
+      ))}
     </>
   );
 }
 
-function VisibilityBody({
-  provider,
-  payload,
-}: {
-  provider: Provider;
-  payload: unknown;
-}) {
-  if (provider === "twilio") {
-    const p = payload as {
-      data?: { subaccounts?: TwilioSub[] };
-      error?: string;
-    };
-    if (p.error) return <div className="err">{p.error}</div>;
-    const subs = p.data?.subaccounts ?? [];
-    if (subs.length === 0) {
-      return (
-        <p className="empty">
-          No subaccounts returned. Confirm subaccounts exist on the parent account and credentials are
-          correct.
-        </p>
-      );
-    }
-    return (
-      <>
-        {subs.map((s) => (
-          <details key={s.sid} className="card" open>
-            <summary>
-              <span>
-                {s.friendlyName}{" "}
-                <span className="meta" style={{ fontWeight: 400 }}>
-                  {s.sid}
-                </span>
-              </span>
-              <span className={`badge ${badgeClass(s.status)}`}>{s.status}</span>
-            </summary>
-            <div className="inner">
-              {s.error && <div className="err">{s.error}</div>}
-              {!s.error && s.profiles.length === 0 && (
-                <p className="empty">No customer profiles on this subaccount.</p>
-              )}
-              {s.profiles.map((pr) => (
-                <details key={pr.sid} className="card" style={{ marginTop: "0.5rem" }}>
-                  <summary>
-                    <span>
-                      Profile: {pr.friendlyName}{" "}
-                      <span className="meta" style={{ fontWeight: 400 }}>
-                        {pr.sid}
-                      </span>
-                    </span>
-                    <span className={`badge ${badgeClass(pr.status)}`}>{pr.statusLabel}</span>
-                  </summary>
-                  <div className="inner">
-                    <p style={{ margin: "0.25rem 0", color: "var(--muted)", fontSize: "0.85rem" }}>
-                      {pr.email && <>Email: {pr.email} · </>}
-                      Updated {pr.dateUpdated ?? "—"}
-                    </p>
-                    <JsonToggle label="Profile (raw)" data={pr.raw} />
-                    {pr.brands.length === 0 && (
-                      <p className="empty">No brand registrations for this profile.</p>
-                    )}
-                    {pr.brands.map((b) => (
-                      <details key={b.sid} style={{ marginTop: "0.75rem" }}>
-                        <summary style={{ cursor: "pointer", fontWeight: 600 }}>
-                          Brand {b.friendlyName}{" "}
-                          <span className={`badge ${badgeClass(b.status)}`}>{b.statusLabel}</span>
-                          {b.identityStatus && (
-                            <span className={`badge neutral`} style={{ marginLeft: 6 }}>
-                              {b.identityStatus}
-                            </span>
-                          )}
-                        </summary>
-                        <div style={{ paddingLeft: "0.5rem", marginTop: "0.5rem" }}>
-                          <p className="meta">{b.overallLabel}</p>
-                          <JsonToggle label="Brand (raw)" data={b.raw} />
-                          <h3>Campaigns (Messaging · Usa2p)</h3>
-                          {b.campaigns.length === 0 && (
-                            <p className="empty">No linked messaging service / Usa2p for this brand.</p>
-                          )}
-                          {b.campaigns.map((c) => (
-                            <div key={c.messagingServiceSid} style={{ marginBottom: "0.75rem" }}>
-                              <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                                <strong>{c.messagingServiceName}</strong>
-                                <span className="meta">{c.messagingServiceSid}</span>
-                                <span className={`badge ${badgeClass(c.campaignStatus)}`}>
-                                  {c.statusLabel}
-                                </span>
-                              </div>
-                              <JsonToggle label="Usa2p (submitted / status)" data={c.raw} />
-                            </div>
-                          ))}
-                        </div>
-                      </details>
-                    ))}
-                  </div>
-                </details>
-              ))}
-              {s.orphanCampaigns.length > 0 && (
-                <>
-                  <h3>Orphan campaigns</h3>
-                  <p className="empty" style={{ marginBottom: "0.75rem" }}>
-                    Usa2p records whose brand could not be matched to a profile brand row.
-                  </p>
-                  {s.orphanCampaigns.map((c) => (
-                    <div key={c.messagingServiceSid} style={{ marginBottom: "0.75rem" }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                        <strong>{c.messagingServiceName}</strong>
-                        <span className={`badge ${badgeClass(c.campaignStatus)}`}>
-                          {c.statusLabel}
-                        </span>
-                      </div>
-                      <JsonToggle label="Usa2p" data={c.raw} />
-                    </div>
-                  ))}
-                </>
-              )}
-            </div>
-          </details>
-        ))}
-      </>
-    );
-  }
+function TelnyxView({ payload, search }: { payload: unknown; search: string }) {
+  const p = payload as { data?: { tenants?: TelnyxTenant[] } };
+  const tenantsRaw = p.data?.tenants ?? [];
 
-  const p = payload as {
-    data?: { tenants?: TelnyxTenant[] };
-  };
-  const tenants = p.data?.tenants ?? [];
+  const tenants = useMemo(() => {
+    const list = tenantsRaw.map((t) => {
+      const brands = !search
+        ? t.brands
+        : t.brands.filter(
+            (b) =>
+              b.displayName.toLowerCase().includes(search) ||
+              b.id.toLowerCase().includes(search) ||
+              (b.tcrBrandId?.toLowerCase().includes(search) ?? false)
+          );
+      const tenantMatch =
+        !search || t.label.toLowerCase().includes(search) || brands.length > 0;
+      return { ...t, brands, _hidden: !tenantMatch && brands.length === 0 };
+    });
+    return list.filter((x) => !x._hidden);
+  }, [tenantsRaw, search]);
+
+  const txTotals = useMemo(() => {
+    let brands = 0;
+    let camps = 0;
+    for (const t of tenantsRaw) {
+      brands += t.brands.length;
+      for (const b of t.brands) camps += b.campaigns.length;
+    }
+    return { tenants: tenantsRaw.length, brands, camps };
+  }, [tenantsRaw]);
+
+  const filteredBrandRows = tenants.reduce((n, t) => n + t.brands.length, 0);
+
   return (
     <>
+      <div className="stats-grid">
+        <div className="stat-card">
+          <div className="stat-value">{txTotals.tenants}</div>
+          <div className="stat-label">API keys / tenants</div>
+        </div>
+        <div className="stat-card">
+          <div className="stat-value">{txTotals.brands}</div>
+          <div className="stat-label">10DLC brands</div>
+        </div>
+        <div className="stat-card">
+          <div className="stat-value">{txTotals.camps}</div>
+          <div className="stat-label">Campaigns (rows)</div>
+        </div>
+      </div>
+      {search && (
+        <p className="filter-hint">
+          Filtered view — {filteredBrandRows} brand row{filteredBrandRows === 1 ? "" : "s"} shown
+        </p>
+      )}
+
       {tenants.map((t) => (
-        <details key={t.label} className="card" open>
+        <details
+          key={t.label}
+          className={`card ${t.error ? "card-error" : ""}`}
+          open={!!t.error || tenants.length === 1}
+        >
           <summary>
-            <span>Telnyx · {t.label}</span>
-            {t.error && <span className="badge bad">Error</span>}
+            <div className="summary-main">
+              <span className="summary-title">Telnyx · {t.label}</span>
+              <span className="summary-sub">
+                {t.brands.length} brand{t.brands.length === 1 ? "" : "s"}
+              </span>
+            </div>
+            {t.error ? (
+              <span className="badge bad">Error</span>
+            ) : (
+              <span className="badge ok">OK</span>
+            )}
           </summary>
           <div className="inner">
             {t.error && <div className="err">{t.error}</div>}
             {!t.error && t.brands.length === 0 && (
-              <p className="empty">No 10DLC brands returned for this key.</p>
+              <p className="empty">No 10DLC brands for this key.</p>
             )}
             {t.brands.map((b) => (
-              <details key={b.id} className="card" style={{ marginTop: "0.5rem" }}>
+              <details key={b.id} className="nested-card" style={{ marginTop: "0.45rem" }}>
                 <summary>
-                  <span>{b.displayName}</span>
+                  <div className="summary-main">
+                    <span className="summary-title">{b.displayName}</span>
+                    <span className="summary-sub">TCR {b.tcrBrandId ?? "—"}</span>
+                  </div>
                   <span>
                     <span className={`badge ${badgeClass(b.status)}`}>{b.statusLabel}</span>
                     {b.identityStatus && (
-                      <span className={`badge neutral`} style={{ marginLeft: 6 }}>
+                      <span className="badge neutral" style={{ marginLeft: 6 }}>
                         {b.identityLabel}
                       </span>
                     )}
                   </span>
                 </summary>
                 <div className="inner">
-                  <p className="meta">TCR brand ID: {b.tcrBrandId ?? "—"}</p>
-                  <JsonToggle label="Brand (raw)" data={b.raw} />
-                  <h3>Campaigns</h3>
+                  <JsonToggle label="Raw brand JSON" data={b.raw} />
+                  <p className="section-label">Campaigns</p>
                   {b.campaigns.length === 0 && (
-                    <p className="empty">No campaigns listed for this brand.</p>
+                    <p className="empty">No campaigns returned for this brand.</p>
                   )}
                   {b.campaigns.map((c) => (
-                    <div key={c.id} style={{ marginBottom: "0.75rem" }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                        <strong>{c.displayName ?? c.id}</strong>
-                        <span className={`badge ${badgeClass(c.status)}`}>{c.statusLabel}</span>
-                        <span className="meta">TCR: {c.tcrCampaignId ?? "—"}</span>
-                      </div>
-                      <JsonToggle label="Campaign (raw)" data={c.raw} />
+                    <div key={c.id} className="campaign-line">
+                      <strong>{c.displayName ?? truncateSid(c.id, 8)}</strong>
+                      <span className={`badge ${badgeClass(c.status)}`}>{c.statusLabel}</span>
+                      <span className="meta">TCR {c.tcrCampaignId ?? "—"}</span>
+                      <JsonToggle label="Raw campaign JSON" data={c.raw} />
                     </div>
                   ))}
                 </div>
@@ -334,18 +542,11 @@ type TelnyxCamp = {
 function JsonToggle({ label, data }: { label: string; data: Record<string, unknown> }) {
   const [open, setOpen] = useState(false);
   return (
-    <div>
-      <button
-        type="button"
-        className="btn"
-        style={{ marginTop: "0.5rem", fontSize: "0.8rem", padding: "0.35rem 0.65rem" }}
-        onClick={() => setOpen((o) => !o)}
-      >
-        {open ? "Hide" : "Show"} {label}
+    <div className="json-toggle">
+      <button type="button" className="btn" onClick={() => setOpen((o) => !o)}>
+        {open ? "▼" : "▶"} {label}
       </button>
-      {open && (
-        <pre className="raw">{JSON.stringify(data, null, 2)}</pre>
-      )}
+      {open && <pre className="raw">{JSON.stringify(data, null, 2)}</pre>}
     </div>
   );
 }
