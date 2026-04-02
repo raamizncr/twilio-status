@@ -32,6 +32,13 @@ REMOTE="https://${USER}:${ENC_TOKEN}@github.com/${REPO}.git"
 BRANCH="$(git branch --show-current 2>/dev/null || echo main)"
 echo "Pushing branch '${BRANCH}' to github.com/${REPO} ..."
 # Disable credential helpers so this URL's token is used (not macOS Keychain / another account).
-GIT_TERMINAL_PROMPT=0 git -c credential.helper= push -u "$REMOTE" "$BRANCH"
+# Do not use -u with TOKEN in URL — that would store the secret in .git/config.
+GIT_TERMINAL_PROMPT=0 git -c credential.helper= push "$REMOTE" "refs/heads/${BRANCH}:refs/heads/${BRANCH}"
 
-echo "Done. Remote URL with token was not saved (one-off push)."
+if git remote get-url origin >/dev/null 2>&1; then
+  GIT_TERMINAL_PROMPT=0 git -c credential.helper= fetch origin "$BRANCH" 2>/dev/null || true
+  git branch --set-upstream-to="origin/${BRANCH}" "$BRANCH" 2>/dev/null && \
+    echo "Upstream set to origin/${BRANCH} (no token in config)." || true
+fi
+
+echo "Done. Token was only used for this push, not saved in remotes."
