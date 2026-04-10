@@ -37,10 +37,13 @@ const TWILIO_BRAND: FieldDef[] = [
 ];
 
 const TWILIO_USA2P: FieldDef[] = [
+  { aliases: ["sid"], label: "Usa2p record SID" },
   { aliases: ["campaign_status", "campaignStatus"], label: "Campaign status" },
   { aliases: ["brand_registration_sid", "brandRegistrationSid"], label: "Brand registration" },
   { aliases: ["campaign_id", "campaignId"], label: "Campaign ID" },
   { aliases: ["messaging_service_sid", "messagingServiceSid"], label: "Messaging service" },
+  { aliases: ["us_app_to_person_usecase", "usAppToPersonUsecase"], label: "Usecase" },
+  { aliases: ["description"], label: "Description" },
   { aliases: ["rate_limits", "rateLimits"], label: "Rate limits" },
   { aliases: ["message_samples", "messageSamples"], label: "Message samples" },
   { aliases: ["has_embedded_links", "hasEmbeddedLinks"], label: "Embedded links" },

@@ -5,7 +5,7 @@ import {
   profileStatusLabel,
   twilioOverallStatus,
 } from "./status-labels.js";
-import { buildRejectionItems, type TwilioRejectionItem } from "./twilio-rejection.js";
+import { buildRejectionItems, collectReasonsFromRaw, type TwilioRejectionItem } from "./twilio-rejection.js";
 import { buildPipelineItems, type TwilioPipelineItem } from "./twilio-pipeline.js";
 
 export type { TwilioRejectionItem, TwilioPipelineItem };
@@ -80,9 +80,13 @@ export type TwilioBrandRow = {
 export type TwilioCampaignRow = {
   messagingServiceSid: string;
   messagingServiceName: string;
+  /** Usa2p compliance record SID (QE…) when present — unique per A2P registration on a service */
+  usa2pRecordSid?: string;
   campaignStatus?: string;
   statusLabel: string;
   overallLabel: string;
+  /** Parsed from raw.errors etc. for failed campaigns */
+  errorMessages?: string[];
   raw: Record<string, unknown>;
 };
 
@@ -193,16 +197,38 @@ async function listMessagingServices(
   return services;
 }
 
-async function getUsa2p(
+/**
+ * Twilio returns `{ compliance: [ {...} ], meta }` (and may paginate). Status lives on each
+ * compliance object, not on the envelope — expanding this fixes UNKNOWN / missing pipeline counts.
+ */
+async function listUsa2pComplianceRecords(
   subSid: string,
   parentToken: string,
   serviceSid: string
-): Promise<Record<string, unknown> | null> {
+): Promise<Record<string, unknown>[]> {
   const auth = basicAuthHeader(subSid, parentToken);
-  return fetchJsonOptional<Record<string, unknown>>(
-    `${MSG}/Services/${encodeURIComponent(serviceSid)}/Compliance/Usa2p`,
-    { headers: { Authorization: auth } }
-  );
+  const merged: Record<string, unknown>[] = [];
+  let next: string | null =
+    `${MSG}/Services/${encodeURIComponent(serviceSid)}/Compliance/Usa2p?PageSize=50`;
+  while (next) {
+    const page = await fetchJsonOptional<Record<string, unknown>>(next, {
+      headers: { Authorization: auth },
+    });
+    if (!page) break;
+    const comp = page.compliance;
+    if (Array.isArray(comp)) {
+      for (const item of comp) {
+        if (item && typeof item === "object") {
+          merged.push(item as Record<string, unknown>);
+        }
+      }
+    } else if (str(page.campaign_status) || str(page.sid)) {
+      merged.push(page);
+    }
+    const meta = page.meta as { next_page_url?: string | null } | undefined;
+    next = meta?.next_page_url ?? null;
+  }
+  return merged;
 }
 
 function str(v: unknown): string | undefined {
@@ -300,33 +326,39 @@ async function processSubaccount(
     const usa2pPairs = await Promise.all(
       withUsa2p.map(async (svc) => ({
         svc,
-        usa2p: await getUsa2p(sid, subToken, svc.sid as string),
+        records: await listUsa2pComplianceRecords(sid, subToken, svc.sid as string),
       }))
     );
-    for (const { svc, usa2p } of usa2pPairs) {
-      if (!usa2p || !svc.sid) continue;
-      const brandReg =
-        str(usa2p.brand_registration_sid) ?? str(usa2p.brandRegistrationSid);
-      const campaignStatus =
-        str(usa2p.campaign_status) ?? str(usa2p.campaignStatus);
-      const campaignRow: TwilioCampaignRow = {
-        messagingServiceSid: svc.sid,
-        messagingServiceName: svc.friendly_name ?? svc.sid,
-        campaignStatus,
-        statusLabel: campaignStatusLabel(campaignStatus),
-        overallLabel: twilioOverallStatus(
-          undefined,
-          undefined,
-          campaignStatus
-        ),
-        raw: usa2p,
-      };
-      if (brandReg) {
-        const list = campaignsByBrand.get(brandReg) ?? [];
-        list.push(campaignRow);
-        campaignsByBrand.set(brandReg, list);
-      } else {
-        row.orphanCampaigns.push(campaignRow);
+    for (const { svc, records } of usa2pPairs) {
+      if (!svc.sid) continue;
+      for (const usa2p of records) {
+        const brandReg =
+          str(usa2p.brand_registration_sid) ?? str(usa2p.brandRegistrationSid);
+        const campaignStatus =
+          str(usa2p.campaign_status) ?? str(usa2p.campaignStatus);
+        const recordSid = str(usa2p.sid);
+        const errs = collectReasonsFromRaw(usa2p);
+        const campaignRow: TwilioCampaignRow = {
+          messagingServiceSid: svc.sid,
+          messagingServiceName: svc.friendly_name ?? svc.sid,
+          usa2pRecordSid: recordSid,
+          campaignStatus,
+          statusLabel: campaignStatusLabel(campaignStatus),
+          overallLabel: twilioOverallStatus(
+            undefined,
+            undefined,
+            campaignStatus
+          ),
+          errorMessages: errs.length > 0 ? errs : undefined,
+          raw: usa2p,
+        };
+        if (brandReg) {
+          const list = campaignsByBrand.get(brandReg) ?? [];
+          list.push(campaignRow);
+          campaignsByBrand.set(brandReg, list);
+        } else {
+          row.orphanCampaigns.push(campaignRow);
+        }
       }
     }
 

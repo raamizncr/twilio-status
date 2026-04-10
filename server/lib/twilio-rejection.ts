@@ -26,6 +26,7 @@ export function collectReasonsFromRaw(raw: Record<string, unknown>): string[] {
           str(o.message) ??
           str(o.description) ??
           str(o.error_message) ??
+          str(o.more_info) ??
           str(o.log);
         const code = str(o.code);
         if (msg) out.push(code ? `${code}: ${msg}` : msg);

@@ -275,6 +275,38 @@ function twilioPipelineCount(s: TwilioSub): number {
   return s.pipelineItems?.length ?? 0;
 }
 
+function TwilioCampaignCard({ c }: { c: TwilioCamp }) {
+  const st = (c.campaignStatus ?? "").toUpperCase();
+  const showErrors =
+    (st === "FAILED" || st === "SUSPENDED") &&
+    c.errorMessages &&
+    c.errorMessages.length > 0;
+  return (
+    <div className="campaign-block">
+      <div className="campaign-line campaign-line--hero">
+        <div className="campaign-title-block">
+          <strong>{c.messagingServiceName}</strong>
+          <span className="meta">{truncateSid(c.messagingServiceSid, 12)}</span>
+          {c.usa2pRecordSid && (
+            <span className="meta" title="Usa2p compliance record SID">
+              Record {truncateSid(c.usa2pRecordSid, 14)}
+            </span>
+          )}
+        </div>
+        <span className={`badge ${badgeClass(c.campaignStatus)}`}>{c.statusLabel}</span>
+      </div>
+      {showErrors && (
+        <ul className="campaign-errors" aria-label="Campaign errors">
+          {c.errorMessages!.map((msg, i) => (
+            <li key={i}>{msg}</li>
+          ))}
+        </ul>
+      )}
+      <RawDataPanel variant="twilio-usa2p" data={c.raw} />
+    </div>
+  );
+}
+
 function rejectionHeadline(it: TwilioRejectionItem): string {
   switch (it.scope) {
     case "profile":
@@ -421,13 +453,6 @@ function TwilioView({ payload, search }: { payload: unknown; search: string }) {
           <div className="stat-label">Failed / rejected (Twilio)</div>
         </div>
       </div>
-      <aside className="info-callout">
-        <strong>Why multiple brands on one subaccount?</strong> Each subaccount can have one or more{" "}
-        <em>Trust Hub customer profiles</em>. Under each profile, Twilio allows multiple{" "}
-        <em>A2P brand registrations</em> — for example different legal entities, DBA names, retries after
-        failure, or separate brands that share the same business customer. So four brands usually means four
-        distinct brand registrations tied to that dealer&apos;s profile(s), not an error in this dashboard.
-      </aside>
       {search && (
         <p className="filter-hint">
           Showing {subs.length} match{subs.length === 1 ? "" : "es"}
@@ -528,17 +553,11 @@ function TwilioView({ payload, search }: { payload: unknown; search: string }) {
                         {b.campaigns.length === 0 && (
                           <p className="empty">No messaging service / Usa2p linked to this brand.</p>
                         )}
-                        {b.campaigns.map((c) => (
-                          <div key={c.messagingServiceSid} className="campaign-block">
-                            <div className="campaign-line">
-                              <strong>{c.messagingServiceName}</strong>
-                              <span className="meta">{truncateSid(c.messagingServiceSid, 12)}</span>
-                              <span className={`badge ${badgeClass(c.campaignStatus)}`}>
-                                {c.statusLabel}
-                              </span>
-                            </div>
-                            <RawDataPanel variant="twilio-usa2p" data={c.raw} />
-                          </div>
+                        {b.campaigns.map((c, i) => (
+                          <TwilioCampaignCard
+                            key={`${c.messagingServiceSid}-${c.usa2pRecordSid ?? String(i)}`}
+                            c={c}
+                          />
                         ))}
                       </div>
                     </details>
@@ -548,18 +567,12 @@ function TwilioView({ payload, search }: { payload: unknown; search: string }) {
             ))}
             {s.orphanCampaigns.length > 0 && (
               <div style={{ marginTop: "1rem" }}>
-                <p className="section-label">Unmatched campaigns</p>
-                <p className="muted-line" style={{ marginBottom: "0.5rem" }}>
-                  Usa2p rows whose brand did not match a profile brand — still listed here.
-                </p>
-                {s.orphanCampaigns.map((c) => (
-                  <div key={c.messagingServiceSid} className="campaign-block">
-                    <div className="campaign-line">
-                      <strong>{c.messagingServiceName}</strong>
-                      <span className={`badge ${badgeClass(c.campaignStatus)}`}>{c.statusLabel}</span>
-                    </div>
-                    <RawDataPanel variant="twilio-usa2p" data={c.raw} />
-                  </div>
+                <p className="section-label">A2P campaigns (messaging service)</p>
+                {s.orphanCampaigns.map((c, i) => (
+                  <TwilioCampaignCard
+                    key={`${c.messagingServiceSid}-${c.usa2pRecordSid ?? String(i)}`}
+                    c={c}
+                  />
                 ))}
               </div>
             )}
@@ -841,8 +854,10 @@ type TwilioBr = {
 type TwilioCamp = {
   messagingServiceSid: string;
   messagingServiceName: string;
+  usa2pRecordSid?: string;
   campaignStatus?: string;
   statusLabel: string;
+  errorMessages?: string[];
   raw: Record<string, unknown>;
 };
 
